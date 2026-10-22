@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#---------------------------------------------------------------#
+#  HyperX Alloy Origins Core (tenkeyless)                       #
+#                                                               #
+#  Grants the user on the active local seat access to the       #
+#  keyboard's hidraw nodes, so the tool does not need root.      #
+#                                                               #
+#  Install:                                                     #
+#    sudo cp 60-hxoctkl.rules /etc/udev/rules.d/     #
+#    sudo udevadm control --reload-rules                        #
+#    sudo udevadm trigger                                       #
+#                                                               #
+#  uaccess is implemented by logind (elogind here), and applies  #
+#  to the active local seat only - it will not help over ssh.    #
+#---------------------------------------------------------------#
+
+SUBSYSTEMS=="usb|hidraw", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="16e6", TAG+="uaccess", TAG+="HyperX_Alloy_Origins_Core"
+
+# HP-branded twin of the same hardware
+SUBSYSTEMS=="usb|hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="098f", TAG+="uaccess", TAG+="HyperX_Alloy_Origins_Core"

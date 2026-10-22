@@ -1,0 +1,655 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 identityapproved
+"""
+hxoctkl - control a HyperX Alloy Origins Core (0951:16e6) on Linux,
+including SAVING per-key RGB into the keyboard's three onboard profiles, which
+HyperX documents as requiring NGENUITY on Windows.
+
+Reverse engineered on Linux with no captures and no Windows. Python standard
+library only: no hidapi, no OpenRGB, no daemon.
+
+PROTOCOL
+  Control interface: USB interface 2, HID usage page 0xFF13, 64-byte reports,
+  no report IDs. Resolve the node by HID_ID + bInterfaceNumber, never by a
+  fixed /dev/hidraw number.
+
+  Frame, as indices into the 65-byte write buffer ([0] is the report-number
+  byte hidraw consumes):
+      [1] command   [2] index   [3] unused   [4] length   [5..] payload
+  Replies echo the header and overwrite the payload; only 0x10 writes a real
+  length into reply byte [3].
+
+  Commands used here:
+      0x10  get device info (firmware at 4-5, name at 8-32, variant at 56)
+      0x15  get active profile          0x95  set active profile
+      0x27  get brightness              0xA7  set brightness
+      0x22  read stored per-key colour, [2] = (profile << 4) | chunk
+      0xA2  stream per-key colour to the live buffer, [2] = chunk
+      0xA3  COMMIT the live buffer into a profile, [2] = profile << 4
+      0x30  device reset (re-enumerates; useful to prove persistence)
+  Status payloads: ec00 unsupported, ec01 bad parameters, ecac success.
+
+  Colour buffer: 380 bytes, 94 LED indices, GRB planes:
+      pos = (idx // 12) * 48 + ((idx // 6) & 1) * 8 + (idx % 6)
+      green at pos, red at pos + 16, blue at pos + 32
+  Streamed as seven chunks (six of 60 bytes, one of 20); each write is
+  payload + 5 bytes rather than a full report.
+
+TWO LAYERS
+  A profile renders an uploaded keyframe animation as its BASE layer, and the
+  per-key colour bank as the layer that flashes on a key press. They are
+  written by different commands and are independent.
+
+USAGE
+  hxoctkl info
+  hxoctkl read [PROFILE]
+  hxoctkl upload PROFILE PATTERN    # base layer, persisted
+  hxoctkl keypress PROFILE R G B    # keypress layer, persisted
+  hxoctkl keypresskeys PROFILE FILE # keypress layer, per key
+  hxoctkl live R G B [SECONDS]      # direct mode, not persisted
+  hxoctkl profile PROFILE           # select active profile
+  hxoctkl brightness LEVEL          # 0-255
+  hxoctkl selftest PROFILE          # write, reset, verify flash
+  hxoctkl udev-rules                # print the udev rule
+
+PERMISSIONS
+  The hidraw node is root-only until a udev rule grants access. Install one and
+  the tool runs as your user:
+
+    hxoctkl udev-rules | sudo tee /etc/udev/rules.d/60-hxoctkl.rules
+    sudo udevadm control --reload-rules && sudo udevadm trigger
+
+  The rule uses TAG+="uaccess", which grants an ACL to the user on the active
+  local seat. It does not apply over ssh; run as root there.
+
+  Substitute doas for sudo if that is what your system uses.
+
+UPLOAD
+  PATTERN is solid:RRGGBB, breathe:RRGGBB, gradient:RRGGBB, or a path to a
+  JSON file holding either one frame of up to 94 [r,g,b] triples or a list of
+  such frames.
+
+    hxoctkl upload 3 solid:ff0000
+    hxoctkl upload 3 breathe:00ff00 --frames 56
+    hxoctkl upload 3 mylights.json
+
+  --frames N      frames to generate (default 1; a static colour is 1 frame)
+  --keypress M    match (default), black, or keep. The keypress layer renders
+                  its stored colour with a fade-to-black envelope that
+                  replaces the base for that key, so match gives a key that
+                  dims on press and black gives one that goes straight dark.
+                  Neither makes a press invisible; that would need the
+                  reactive behaviour switched off, which is not yet located.
+                  keep leaves whatever the layer last held.
+  --delay MS      sleep after each keyframe report; only useful for testing,
+                  the firmware tolerates at least 9 ms
+
+Colour arguments accept decimal or 0x hex.
+"""
+
+import json
+import math
+import os
+import select
+import sys
+import time
+
+VID, PID = 0x0951, 0x16E6
+WANT_IFACE = 2
+PKT = 65
+BUFLEN = 380
+NLEDS = 94
+CHUNK = 60
+NOTIFY = {0x70, 0x71, 0x73}
+
+CMD_INFO = 0x10
+CMD_GET_PROFILE = 0x15
+CMD_READ_COLOR = 0x22
+CMD_GET_BRIGHT = 0x27
+CMD_READ_STORE = 0x30
+CMD_WRITE_GUID = 0x93
+CMD_WRITE_FIVE = 0x94
+CMD_SET_PROFILE = 0x95
+CMD_WRITE_CONFIG = 0xA0
+CMD_STREAM = 0xA2
+CMD_COMMIT = 0xA3
+CMD_ANIM_BRACKET = 0xA4
+CMD_ANIM_FRAME = 0xA5
+CMD_SET_BRIGHT = 0xA7
+CMD_WRITE_STORE = 0xB0
+
+ANIM_BEGIN, ANIM_END = 0x55, 0xAA
+STORE_CHUNKS = 13          # the 780-byte per-profile store, 60 bytes a chunk
+# The effect GUID is metadata: the firmware renders correctly with it zeroed,
+# so we write zeros rather than reusing a vendor preset's identifier.
+GUID_ZERO = bytes(16)
+
+RULES_NAME = '60-hxoctkl.rules'
+RULES_DIRS = ('/etc/udev/rules.d', '/usr/lib/udev/rules.d')
+UDEV_RULES = '''\
+#---------------------------------------------------------------#
+#  HyperX Alloy Origins Core (tenkeyless)                       #
+#---------------------------------------------------------------#
+
+SUBSYSTEMS=="usb|hidraw", ATTRS{idVendor}=="0951", ATTRS{idProduct}=="16e6", \
+TAG+="uaccess", TAG+="HyperX_Alloy_Origins_Core"
+
+# HP-branded twin of the same hardware
+SUBSYSTEMS=="usb|hidraw", ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="098f", \
+TAG+="uaccess", TAG+="HyperX_Alloy_Origins_Core"
+'''
+
+
+class ProtocolError(Exception):
+    pass
+
+
+def find_node():
+    base = '/sys/class/hidraw'
+    want = '0003:%08X:%08X' % (VID, PID)
+    for node in sorted(os.listdir(base)):
+        try:
+            with open(os.path.join(base, node, 'device', 'uevent')) as fh:
+                fields = dict(l.strip().split('=', 1) for l in fh if '=' in l)
+        except OSError:
+            continue
+        if fields.get('HID_ID', '').upper() != want:
+            continue
+        dev = os.path.realpath(os.path.join(base, node, 'device'))
+        try:
+            with open(os.path.join(os.path.dirname(dev),
+                                   'bInterfaceNumber')) as fh:
+                if int(fh.read().strip(), 16) == WANT_IFACE:
+                    return '/dev/' + node
+        except OSError:
+            pass
+    return None
+
+
+def open_device(wait=0.0):
+    deadline = time.time() + wait
+    while True:
+        node = find_node()
+        if node:
+            try:
+                return os.open(node, os.O_RDWR)
+            except PermissionError:
+                raise SystemExit(permission_help(node))
+            except OSError:
+                pass
+        if time.time() >= deadline:
+            raise SystemExit(
+                'No HyperX Alloy Origins Core found.\n\n'
+                'This tool supports exactly two devices:\n'
+                '  0951:16e6  HyperX Alloy Origins Core (tenkeyless)\n'
+                '  03f0:098f  the HP-branded version of the same hardware\n\n'
+                'Other Alloy models - the full-size Origins, the 60%, the 65%,\n'
+                'the Elite - use different protocols and different LED counts.\n'
+                'Writing this layout to one of those would corrupt an onboard\n'
+                'profile that could then only be repaired from Windows, so it\n'
+                'refuses to run rather than guessing.\n\n'
+                'If the keyboard is plugged in, check that it is not claimed by\n'
+                'a virtual machine or another process.')
+        time.sleep(0.3)
+
+
+def permission_help(node):
+    """Name the fix rather than leaving a bare permission error."""
+    installed = [d for d in RULES_DIRS
+                 if os.path.exists(os.path.join(d, RULES_NAME))]
+    lines = ['no permission to open %s' % node]
+    if len(installed) > 1:
+        lines += ['', '%s is installed in both %s.' % (RULES_NAME,
+                                                       ' and '.join(installed)),
+                  'Two copies can conflict; remove one, then replug.']
+    elif installed:
+        lines += ['', '%s is installed in %s, so either the rules have not'
+                      % (RULES_NAME, installed[0]),
+                  'been reloaded or you are not on the active local seat',
+                  '(uaccess does not apply over ssh). Try:',
+                  '  sudo udevadm control --reload-rules && sudo udevadm trigger',
+                  'or run this as root.']
+    else:
+        lines += ['', 'No udev rule is installed, so the device is root-only.',
+                  'Either run as root, or install the rule:',
+                  '  %s udev-rules | sudo tee %s/%s'
+                  % (sys.argv[0], RULES_DIRS[0], RULES_NAME),
+                  '  sudo udevadm control --reload-rules && sudo udevadm trigger']
+    return '\n'.join(lines)
+
+
+def cmd_udev_rules(fd, args):
+    print(UDEV_RULES, end='')
+
+
+def drain(fd):
+    while True:
+        ready, _, _ = select.select([fd], [], [], 0.02)
+        if not ready:
+            return
+        os.read(fd, PKT)
+
+
+def send(fd, command, index=0, chunk=0, length=0, payload=b''):
+    """Fire and forget. chunk is wire byte 2, used by 0x30/0xB0/0xA5."""
+    pkt = bytearray(PKT)
+    pkt[1] = command
+    pkt[2] = index
+    pkt[3] = chunk
+    pkt[4] = length
+    pkt[5:5 + len(payload)] = payload
+    os.write(fd, bytes(pkt))
+
+
+def request(fd, command, index=0, chunk=0, length=0, payload=b'', retries=3):
+    """Send one frame and return the reply whose echoed opcode matches."""
+    for _ in range(retries):
+        drain(fd)
+        send(fd, command, index, chunk, length, payload)
+        for _ in range(5):
+            ready, _, _ = select.select([fd], [], [], 0.3)
+            if not ready:
+                break
+            rep = os.read(fd, PKT)
+            if rep[0] == command:
+                return rep
+            if rep[0] not in NOTIFY:
+                return rep
+    return None
+
+
+def status(rep):
+    if rep is None:
+        return 'silent'
+    length = rep[3]
+    body = rep[4:4 + length] if length else b''
+    if len(body) >= 2 and body[0] == 0xEC:
+        return {0x00: 'unsupported', 0x01: 'bad-parameters',
+                0xAC: 'ok'}.get(body[1], 'ec%02x' % body[1])
+    return None
+
+
+def expect_ok(rep, what):
+    st = status(rep)
+    if st not in (None, 'ok'):
+        raise ProtocolError('%s failed: %s' % (what, st))
+    return rep
+
+
+def pack(colors):
+    """94 (r, g, b) tuples -> the 380-byte GRB buffer."""
+    buf = bytearray(BUFLEN)
+    for idx, (r, g, b) in enumerate(colors[:NLEDS]):
+        pos = (idx // 12) * 48 + ((idx // 6) & 1) * 8 + (idx % 6)
+        buf[pos] = g & 0xFF
+        buf[pos + 16] = r & 0xFF
+        buf[pos + 32] = b & 0xFF
+    return bytes(buf)
+
+
+def unpack(buf):
+    out = []
+    for idx in range(NLEDS):
+        pos = (idx // 12) * 48 + ((idx // 6) & 1) * 8 + (idx % 6)
+        out.append((buf[pos + 16], buf[pos], buf[pos + 32]))
+    return out
+
+
+def stream(fd, buf):
+    """Push the buffer into the live display buffer (profile 0 / chunk only)."""
+    sent = chunk = 0
+    while sent < len(buf):
+        size = min(CHUNK, len(buf) - sent)
+        pkt = bytearray(PKT)
+        pkt[1] = CMD_STREAM
+        pkt[2] = chunk
+        pkt[4] = size
+        pkt[5:5 + size] = buf[sent:sent + size]
+        os.write(fd, bytes(pkt[:size + 5]))
+        sent += size
+        chunk += 1
+
+
+def commit(fd, profile):
+    """Copy the live buffer into the given onboard profile."""
+    return expect_ok(request(fd, CMD_COMMIT, index=profile << 4),
+                     'commit to profile %d' % profile)
+
+
+def read_profile(fd, profile):
+    buf = bytearray(BUFLEN)
+    for chunk in range(7):
+        size = min(CHUNK, BUFLEN - chunk * CHUNK)
+        rep = request(fd, CMD_READ_COLOR, index=(profile << 4) | chunk)
+        st = status(rep)
+        if st is not None:
+            raise ProtocolError('read profile %d chunk %d: %s'
+                                % (profile, chunk, st))
+        buf[chunk * CHUNK:chunk * CHUNK + size] = rep[4:4 + size]
+    return bytes(buf)
+
+
+def save_profile(fd, profile, colors):
+    want = pack(colors)
+    stream(fd, want)
+    commit(fd, profile)
+    got = read_profile(fd, profile)
+    return want, got
+
+
+def histogram(colors):
+    counts = {}
+    for c in colors:
+        counts[c] = counts.get(c, 0) + 1
+    items = sorted(counts.items(), key=lambda kv: -kv[1])
+    return ', '.join('%d x #%02x%02x%02x' % (n, c[0], c[1], c[2])
+                     for c, n in items[:5])
+
+
+def check_profile(value):
+    profile = int(value, 0)
+    if profile not in (1, 2, 3):
+        raise SystemExit('profile must be 1, 2 or 3')
+    return profile
+
+
+def cmd_info(fd, args):
+    rep = request(fd, CMD_INFO)
+    if status(rep) is not None:
+        raise ProtocolError('device info: %s' % status(rep))
+    name = bytes(rep[8:33]).split(b'\x00')[0].decode('ascii', 'replace')
+    print('device     : %s' % name)
+    print('firmware   : %02X.%02X' % (rep[4], rep[5]))
+    print('layout     : variant 0x%02x' % rep[56])
+    prof = request(fd, CMD_GET_PROFILE)
+    print('profile    : %d' % prof[4])
+    bright = request(fd, CMD_GET_BRIGHT)
+    print('brightness : %d / 255' % bright[4])
+
+
+def cmd_read(fd, args):
+    profiles = [check_profile(args[0])] if args else [1, 2, 3]
+    for profile in profiles:
+        colors = unpack(read_profile(fd, profile))
+        print('profile %d: %s' % (profile, histogram(colors)))
+
+
+def cmd_save(fd, args):
+    if len(args) < 4:
+        raise SystemExit('usage: save PROFILE R G B')
+    profile = check_profile(args[0])
+    rgb = tuple(int(a, 0) & 0xFF for a in args[1:4])
+    want, got = save_profile(fd, profile, [rgb] * NLEDS)
+    print('saved #%02x%02x%02x to profile %d' % (rgb + (profile,)))
+    print('read-back  : %s' % ('exact' if want == got else 'MISMATCH'))
+    if want != got:
+        bad = sum(1 for i in range(BUFLEN) if want[i] != got[i])
+        print('             %d of %d bytes differ' % (bad, BUFLEN))
+    expect_ok(request(fd, CMD_SET_PROFILE, length=1,
+                      payload=bytes([profile])), 'select profile')
+    print('profile %d selected' % profile)
+
+
+def cmd_savekeys(fd, args):
+    if len(args) < 2:
+        raise SystemExit('usage: savekeys PROFILE FILE')
+    profile = check_profile(args[0])
+    with open(args[1]) as fh:
+        data = json.load(fh)
+    colors = [tuple(int(v) & 0xFF for v in c[:3]) for c in data]
+    if len(colors) < NLEDS:
+        colors += [(0, 0, 0)] * (NLEDS - len(colors))
+    want, got = save_profile(fd, profile, colors)
+    print('saved %d key colours to profile %d' % (min(len(data), NLEDS), profile))
+    print('read-back  : %s' % ('exact' if want == got else 'MISMATCH'))
+    expect_ok(request(fd, CMD_SET_PROFILE, length=1,
+                      payload=bytes([profile])), 'select profile')
+
+
+def cmd_live(fd, args):
+    if len(args) < 3:
+        raise SystemExit('usage: live R G B [SECONDS]')
+    rgb = tuple(int(a, 0) & 0xFF for a in args[:3])
+    secs = float(args[3]) if len(args) > 3 else 8.0
+    buf = pack([rgb] * NLEDS)
+    print('streaming #%02x%02x%02x for %.0fs (not persisted)' % (rgb + (secs,)))
+    end = time.time() + secs
+    while time.time() < end:
+        stream(fd, buf)
+        time.sleep(0.01)
+    print('stopped; the keyboard reverts to its onboard profile')
+
+
+def cmd_profile(fd, args):
+    profile = check_profile(args[0])
+    expect_ok(request(fd, CMD_SET_PROFILE, length=1, payload=bytes([profile])),
+              'select profile')
+    print('active profile: %d' % request(fd, CMD_GET_PROFILE)[4])
+
+
+def cmd_brightness(fd, args):
+    level = int(args[0], 0) & 0xFF
+    expect_ok(request(fd, CMD_SET_BRIGHT, length=1, payload=bytes([level])),
+              'set brightness')
+    print('brightness: %d / 255' % request(fd, CMD_GET_BRIGHT)[4])
+
+
+def cmd_selftest(fd, args):
+    profile = check_profile(args[0]) if args else 3
+    before = read_profile(fd, profile)
+    print('profile %d before : %s' % (profile, histogram(unpack(before))))
+    marker = (0x00, 0xFF, 0x00)
+    want, got = save_profile(fd, profile, [marker] * NLEDS)
+    print('wrote #%02x%02x%02x, read-back %s'
+          % (marker + ('exact' if want == got else 'MISMATCH',)))
+    print('resetting the device via 0x30 ...')
+    try:
+        request(fd, CMD_RESET, retries=1)
+    except OSError:
+        pass
+    os.close(fd)
+    time.sleep(2.0)
+    fd = open_device(wait=20.0)
+    after = read_profile(fd, profile)
+    if after == want:
+        print('PASS: the colour survived a device reset - genuine onboard flash')
+    else:
+        print('FAIL: after reset the profile holds %s'
+              % histogram(unpack(after)))
+    return fd
+
+
+def generate(pattern, frames):
+    """PATTERN -> a list of frames, each a list of (r, g, b) per LED index."""
+    if ':' not in pattern:
+        with open(pattern) as fh:
+            data = json.load(fh)
+
+        def as_rgb(c):
+            if isinstance(c, str):
+                v = int(c.lstrip('#'), 16)
+                return ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
+            return tuple(int(x) & 0xFF for x in c[:3])
+
+        if isinstance(data, dict):
+            raw = []
+            for frame in data['frames']:
+                if 'all' in frame:
+                    raw.append([frame['all']] * NLEDS)
+                else:
+                    raw.append(frame['colors'])
+        elif data and isinstance(data[0][0], (list, tuple, str)):
+            raw = data
+        else:
+            raw = [data]
+
+        out = []
+        for frame in raw:
+            colors = [as_rgb(c) for c in frame[:NLEDS]]
+            colors += [(0, 0, 0)] * (NLEDS - len(colors))
+            out.append(colors)
+        return out
+
+    name, _, hexcolor = pattern.partition(':')
+    v = int(hexcolor, 16)
+    base = ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
+    if name == 'solid':
+        return [[base] * NLEDS for _ in range(frames)]
+    if name == 'breathe':
+        out = []
+        for n in range(frames):
+            k = math.sin(math.pi * n / max(frames - 1, 1))
+            out.append([tuple(int(c * k) for c in base)] * NLEDS)
+        return out
+    if name == 'gradient':
+        out = []
+        for n in range(frames):
+            shift = n / max(frames, 1)
+            out.append([tuple(int(c * ((i / NLEDS + shift) % 1.0))
+                              for c in base) for i in range(NLEDS)])
+        return out
+    raise SystemExit('unknown pattern %r' % name)
+
+
+def brightest(frames):
+    best = (0, 0, 0)
+    for frame in frames:
+        for c in frame:
+            if sum(c) > sum(best):
+                best = c
+    return best
+
+
+def upload_animation(fd, profile, frames, delay_ms=0.0):
+    """Write the base layer: the keyframe animation a profile renders."""
+    count = len(frames)
+    if not 1 <= count <= 255:
+        raise ProtocolError('frame count %d out of range 1-255' % count)
+
+    store = bytearray()
+    for chunk in range(1, STORE_CHUNKS + 1):
+        rep = request(fd, CMD_READ_STORE, index=profile, chunk=chunk,
+                      length=CHUNK)
+        if status(rep) is not None:
+            raise ProtocolError('cannot read the per-profile store; refusing '
+                                'to upload without writing it back unchanged')
+        store += bytes(rep[4:64])
+
+    send(fd, CMD_SET_PROFILE, length=1, payload=bytes([profile]))
+    send(fd, CMD_WRITE_FIVE, index=profile, length=5, payload=bytes(5))
+    for chunk in range(1, STORE_CHUNKS + 1):
+        start = (chunk - 1) * CHUNK
+        send(fd, CMD_WRITE_STORE, index=profile, chunk=chunk, length=CHUNK,
+             payload=bytes(store[start:start + CHUNK]))
+    send(fd, CMD_WRITE_GUID, index=profile << 4, length=0x20,
+         payload=GUID_ZERO)
+    send(fd, CMD_ANIM_BRACKET, index=profile, length=2,
+         payload=bytes([ANIM_BEGIN, count]))
+
+    for n, frame in enumerate(frames, start=1):
+        buf = pack(frame)
+        for chunk in range(7):
+            start = chunk * CHUNK
+            size = min(CHUNK, BUFLEN - start)
+            send(fd, CMD_ANIM_FRAME, index=(profile << 4) | chunk, chunk=n,
+                 length=size, payload=buf[start:start + size])
+            if delay_ms:
+                time.sleep(delay_ms / 1000.0)
+
+    send(fd, CMD_ANIM_BRACKET, index=profile, length=2,
+         payload=bytes([ANIM_END, count]))
+
+    r, g, b = brightest(frames)
+    config = bytearray(23)
+    config[0], config[1] = 0x09, 0x18
+    config[10] = count
+    config[12] = 0x04
+    config[15] = 0x01
+    config[16], config[17], config[18] = r, g, b
+    send(fd, CMD_WRITE_CONFIG, index=profile, length=0x17,
+         payload=bytes(config))
+    send(fd, CMD_SET_PROFILE, length=1, payload=bytes([profile]))
+    return (r, g, b)
+
+
+def cmd_upload(fd, args):
+    if len(args) < 2:
+        raise SystemExit('usage: upload PROFILE PATTERN [--frames N] '
+                         '[--keypress match|black|keep] [--delay MS]')
+    profile = check_profile(args[0])
+    pattern = args[1]
+    rest = args[2:]
+
+    def flag(name, default):
+        return rest[rest.index(name) + 1] if name in rest else default
+
+    count = int(flag('--frames', '1'), 0)
+    keypress = flag('--keypress', 'match')
+    delay = float(flag('--delay', '0'))
+    if keypress not in ('match', 'black', 'keep'):
+        raise SystemExit('--keypress must be match, black or keep')
+
+    frames = generate(pattern, count)
+    peak = upload_animation(fd, profile, frames, delay)
+    print('uploaded %d frame(s) to profile %d, brightest #%02x%02x%02x'
+          % (len(frames), profile, peak[0], peak[1], peak[2]))
+
+    if keypress != 'keep':
+        colour = peak if keypress == 'match' else (0, 0, 0)
+        want = pack([colour] * NLEDS)
+        stream(fd, want)
+        commit(fd, profile)
+        got = read_profile(fd, profile)
+        print('keypress layer set to #%02x%02x%02x (%s)'
+              % (colour + ('exact' if got == want else 'MISMATCH',)))
+    else:
+        print('keypress layer left as-is; it keeps whatever it last held')
+
+    send(fd, CMD_SET_PROFILE, length=1, payload=bytes([profile]))
+    print('profile %d selected' % profile)
+
+
+COMMANDS = {
+    'info': cmd_info, 'read': cmd_read, 'upload': cmd_upload,
+    'udev-rules': cmd_udev_rules,
+    'keypress': cmd_save, 'keypresskeys': cmd_savekeys,
+    'live': cmd_live, 'profile': cmd_profile,
+    'brightness': cmd_brightness, 'selftest': cmd_selftest,
+    # pre-layer-split names, kept so older invocations still work
+    'save': cmd_save, 'savekeys': cmd_savekeys,
+}
+
+# these must work when the device cannot be opened - that is when they are needed
+NO_DEVICE = {'udev-rules'}
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ('-h', '--help', 'help'):
+        print(__doc__.strip())
+        return 0
+    name = argv[0]
+    if name not in COMMANDS:
+        raise SystemExit('unknown command %r; try --help' % name)
+    if name in NO_DEVICE:
+        return COMMANDS[name](None, argv[1:]) or 0
+    fd = open_device()
+    try:
+        result = COMMANDS[name](fd, argv[1:])
+        if isinstance(result, int):
+            fd = result
+    except ProtocolError as exc:
+        raise SystemExit('error: %s' % exc)
+    except KeyboardInterrupt:
+        print('\ninterrupted')
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
