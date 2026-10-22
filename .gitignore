@@ -1,0 +1,7 @@
+# captures and derived artefacts stay out of the published tree
+*.pcap
+*.pcapng
+*.hxp
+
+__pycache__/
+*.pyc
