@@ -75,7 +75,9 @@ UPLOAD
     hxoctkl upload 3 mylights.json
 
   --frames N      frames to generate (default 1; a static colour is 1 frame)
-  --keypress M    match (default), black, or keep. The keypress layer renders
+  --keypress M    match (default), black, or keep. A preset file may carry its
+                  own per-key layer under a "keypress" key, which match uses in
+                  preference to a flat colour. The keypress layer renders
                   its stored colour with a fade-to-black envelope that
                   replaces the base for that key, so match gives a key that
                   dims on press and black gives one that goes straight dark.
@@ -512,6 +514,28 @@ def generate(pattern, frames):
     raise SystemExit('unknown pattern %r' % name)
 
 
+def load_keypress(pattern):
+    """A preset may carry its own key-press layer as a single frame."""
+    if ':' in pattern or not os.path.exists(pattern):
+        return None
+    with open(pattern) as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict) or 'keypress' not in data:
+        return None
+
+    def as_rgb(c):
+        if isinstance(c, str):
+            v = int(c.lstrip('#'), 16)
+            return ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
+        return tuple(int(x) & 0xFF for x in c[:3])
+
+    kp = data['keypress']
+    colors = ([kp['all']] * NLEDS) if 'all' in kp else kp['colors']
+    out = [as_rgb(c) for c in colors[:NLEDS]]
+    out += [(0, 0, 0)] * (NLEDS - len(out))
+    return out
+
+
 def brightest(frames):
     best = (0, 0, 0)
     for frame in frames:
@@ -595,7 +619,15 @@ def cmd_upload(fd, args):
     print('uploaded %d frame(s) to profile %d, brightest #%02x%02x%02x'
           % (len(frames), profile, peak[0], peak[1], peak[2]))
 
-    if keypress != 'keep':
+    from_file = load_keypress(pattern) if keypress == 'match' else None
+    if from_file is not None:
+        want = pack(from_file)
+        stream(fd, want)
+        commit(fd, profile)
+        got = read_profile(fd, profile)
+        print('keypress layer from the preset, %d distinct colours (%s)'
+              % (len(set(from_file)), 'exact' if got == want else 'MISMATCH'))
+    elif keypress != 'keep':
         colour = peak if keypress == 'match' else (0, 0, 0)
         want = pack([colour] * NLEDS)
         stream(fd, want)

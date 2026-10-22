@@ -1,0 +1,357 @@
+{
+ "0": {
+  "usage": 41,
+  "name": "escape"
+ },
+ "1": {
+  "usage": 58,
+  "name": "f1"
+ },
+ "2": {
+  "usage": 59,
+  "name": "f2"
+ },
+ "3": {
+  "usage": 60,
+  "name": "f3"
+ },
+ "4": {
+  "usage": 61,
+  "name": "f4"
+ },
+ "5": {
+  "usage": 62,
+  "name": "f5"
+ },
+ "6": {
+  "usage": 63,
+  "name": "f6"
+ },
+ "7": {
+  "usage": 64,
+  "name": "f7"
+ },
+ "8": {
+  "usage": 53,
+  "name": "grave"
+ },
+ "9": {
+  "usage": 30,
+  "name": "1"
+ },
+ "10": {
+  "usage": 31,
+  "name": "2"
+ },
+ "11": {
+  "usage": 32,
+  "name": "3"
+ },
+ "12": {
+  "usage": 33,
+  "name": "4"
+ },
+ "13": {
+  "usage": 34,
+  "name": "5"
+ },
+ "14": {
+  "usage": 35,
+  "name": "6"
+ },
+ "15": {
+  "usage": 36,
+  "name": "7"
+ },
+ "16": {
+  "usage": 37,
+  "name": "8"
+ },
+ "17": {
+  "usage": 43,
+  "name": "tab"
+ },
+ "18": {
+  "usage": 20,
+  "name": "q"
+ },
+ "19": {
+  "usage": 26,
+  "name": "w"
+ },
+ "20": {
+  "usage": 8,
+  "name": "e"
+ },
+ "21": {
+  "usage": 21,
+  "name": "r"
+ },
+ "22": {
+  "usage": 23,
+  "name": "t"
+ },
+ "23": {
+  "usage": 28,
+  "name": "y"
+ },
+ "24": {
+  "usage": 24,
+  "name": "u"
+ },
+ "25": {
+  "usage": 57,
+  "name": "capslock"
+ },
+ "26": {
+  "usage": 4,
+  "name": "a"
+ },
+ "27": {
+  "usage": 22,
+  "name": "s"
+ },
+ "28": {
+  "usage": 7,
+  "name": "d"
+ },
+ "29": {
+  "usage": 9,
+  "name": "f"
+ },
+ "30": {
+  "usage": 10,
+  "name": "g"
+ },
+ "31": {
+  "usage": 11,
+  "name": "h"
+ },
+ "32": {
+  "usage": 13,
+  "name": "j"
+ },
+ "33": {
+  "usage": 225,
+  "name": "leftshift"
+ },
+ "34": null,
+ "35": {
+  "usage": 29,
+  "name": "z"
+ },
+ "36": {
+  "usage": 27,
+  "name": "x"
+ },
+ "37": {
+  "usage": 6,
+  "name": "c"
+ },
+ "38": {
+  "usage": 25,
+  "name": "v"
+ },
+ "39": {
+  "usage": 5,
+  "name": "b"
+ },
+ "40": {
+  "usage": 17,
+  "name": "n"
+ },
+ "41": {
+  "usage": 224,
+  "name": "leftctrl"
+ },
+ "42": {
+  "usage": 227,
+  "name": "leftmeta"
+ },
+ "43": {
+  "usage": 226,
+  "name": "leftalt"
+ },
+ "44": null,
+ "45": {
+  "usage": 44,
+  "name": "space"
+ },
+ "46": null,
+ "47": null,
+ "48": {
+  "usage": 65,
+  "name": "f8"
+ },
+ "49": {
+  "usage": 66,
+  "name": "f9"
+ },
+ "50": {
+  "usage": 67,
+  "name": "f10"
+ },
+ "51": {
+  "usage": 68,
+  "name": "f11"
+ },
+ "52": {
+  "usage": 69,
+  "name": "f12"
+ },
+ "53": {
+  "usage": 70,
+  "name": "printscreen"
+ },
+ "54": {
+  "usage": 71,
+  "name": "scrolllock"
+ },
+ "55": {
+  "usage": 72,
+  "name": "pause"
+ },
+ "56": {
+  "usage": 38,
+  "name": "9"
+ },
+ "57": {
+  "usage": 39,
+  "name": "0"
+ },
+ "58": {
+  "usage": 45,
+  "name": "minus"
+ },
+ "59": {
+  "usage": 46,
+  "name": "equal"
+ },
+ "60": {
+  "usage": 42,
+  "name": "backspace"
+ },
+ "61": {
+  "usage": 73,
+  "name": "insert"
+ },
+ "62": {
+  "usage": 74,
+  "name": "home"
+ },
+ "63": {
+  "usage": 75,
+  "name": "pageup"
+ },
+ "64": {
+  "usage": 12,
+  "name": "i"
+ },
+ "65": {
+  "usage": 18,
+  "name": "o"
+ },
+ "66": {
+  "usage": 19,
+  "name": "p"
+ },
+ "67": {
+  "usage": 47,
+  "name": "leftbracket"
+ },
+ "68": {
+  "usage": 48,
+  "name": "rightbracket"
+ },
+ "69": {
+  "usage": 49,
+  "name": "backslash"
+ },
+ "70": {
+  "usage": 76,
+  "name": "delete"
+ },
+ "71": {
+  "usage": 77,
+  "name": "end"
+ },
+ "72": {
+  "usage": 78,
+  "name": "pagedown"
+ },
+ "73": {
+  "usage": 14,
+  "name": "k"
+ },
+ "74": {
+  "usage": 15,
+  "name": "l"
+ },
+ "75": {
+  "usage": 51,
+  "name": "semicolon"
+ },
+ "76": {
+  "usage": 52,
+  "name": "quote"
+ },
+ "77": null,
+ "78": {
+  "usage": 40,
+  "name": "enter"
+ },
+ "79": {
+  "usage": 16,
+  "name": "m"
+ },
+ "80": {
+  "usage": 54,
+  "name": "comma"
+ },
+ "81": {
+  "usage": 55,
+  "name": "period"
+ },
+ "82": {
+  "usage": 56,
+  "name": "slash"
+ },
+ "83": null,
+ "84": {
+  "usage": 229,
+  "name": "rightshift"
+ },
+ "85": {
+  "usage": 82,
+  "name": "up"
+ },
+ "86": {
+  "usage": 230,
+  "name": "rightalt"
+ },
+ "87": {
+  "usage": 232,
+  "name": "fn"
+ },
+ "88": {
+  "usage": 101,
+  "name": "menu"
+ },
+ "89": {
+  "usage": 228,
+  "name": "rightctrl"
+ },
+ "90": {
+  "usage": 80,
+  "name": "left"
+ },
+ "91": {
+  "usage": 81,
+  "name": "down"
+ },
+ "92": {
+  "usage": 79,
+  "name": "right"
+ },
+ "93": null
+}

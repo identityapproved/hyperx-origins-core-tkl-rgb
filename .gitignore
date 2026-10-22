@@ -5,3 +5,6 @@
 
 __pycache__/
 *.pyc
+
+# still does not match the desktop it is named after; see hwrev backlog
+presets/lain.json

@@ -87,7 +87,17 @@ the key-press layer last held flashing on every keystroke.
 ```
 
 `upload` takes `solid:RRGGBB`, `breathe:RRGGBB`, `gradient:RRGGBB`, or a path
-to a JSON animation.
+to a JSON animation. `docs/PRESETS.md` covers the JSON format and authoring by
+key name; `keymap.json` maps every LED index to its key.
+
+Five examples ship in `presets/`: `gaming.json` picks out WASD and the arrows,
+`vim.json` colours the board by what each key does in vim, `typing.json` gives
+each finger column its own hue, `wave.json` sweeps a hue band across the whole
+board, and `regions.json` colours each cluster so you can see how indices map
+onto the keyboard.
+
+`keymap.json` maps every LED index to its key; `layout.json` gives each key a
+physical position, which is what anything spatial needs.
 
 ## How it works ( ̄□ ̄；)
 
